@@ -3,29 +3,39 @@ import { supabase } from './supabase'
 import type { HeatmapCell, Solution, Subsidiary, AuditLog } from './supabase'
 
 export async function getHeatmapData(): Promise<HeatmapCell[]> {
-  const { data, error } = await supabase
-    .from('installation_status')
-    .select(`
-      subsidiary_id, solution_id, is_installed, install_rate, note,
-      subsidiary:subsidiaries(id, name, code, country, region:regions(name)),
-      solution:solutions(id, code)
-    `)
-    .order('solution_id')
+  // 조인 없이 단순 쿼리 3개로 분리 → RLS 중첩 조인 오류 방지
+  const [statusRes, subRes, solRes] = await Promise.all([
+    supabase.from('installation_status').select('*'),
+    supabase.from('subsidiaries').select('*, region:regions(name)'),
+    supabase.from('solutions').select('id, code'),
+  ])
 
-  if (error) throw error
+  if (statusRes.error) throw statusRes.error
+  if (subRes.error)    throw subRes.error
+  if (solRes.error)    throw solRes.error
 
-  return (data ?? []).map((row: any) => ({
-    subsidiary_id:   row.subsidiary_id,
-    subsidiary_name: row.subsidiary.name,
-    subsidiary_code: row.subsidiary.code,
-    region_name:     row.subsidiary.region.name,
-    country:         row.subsidiary.country,
-    solution_id:     row.solution_id,
-    solution_code:   row.solution.code,
-    is_installed:    row.is_installed,
-    install_rate:    row.install_rate,
-    note:            row.note,
-  }))
+  const subs = new Map((subRes.data ?? []).map((s: any) => [s.id, s]))
+  const sols = new Map((solRes.data ?? []).map((s: any) => [s.id, s]))
+
+  return (statusRes.data ?? [])
+    .map((row: any) => {
+      const sub = subs.get(row.subsidiary_id)
+      const sol = sols.get(row.solution_id)
+      if (!sub || !sol) return null
+      return {
+        subsidiary_id:   row.subsidiary_id,
+        subsidiary_name: sub.name,
+        subsidiary_code: sub.code,
+        region_name:     sub.region?.name ?? '',
+        country:         sub.country,
+        solution_id:     row.solution_id,
+        solution_code:   sol.code,
+        is_installed:    row.is_installed,
+        install_rate:    row.install_rate,
+        note:            row.note,
+      }
+    })
+    .filter(Boolean) as HeatmapCell[]
 }
 
 export async function getSolutions(): Promise<Solution[]> {
